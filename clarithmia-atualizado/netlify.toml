@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Serverless functions (Phase 6 connectors). Routes are declared inside each
+# function through `export const config = { path: ... }`:
+#   /api/connectors/zendesk   /api/connectors/twitter   /api/webhooks/incoming
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
