@@ -1,0 +1,13 @@
+# The app lives in a subdirectory; build from there.
+# `publish` and `functions` paths are relative to `base`.
+[build]
+  base = "clarithmia-atualizado"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
