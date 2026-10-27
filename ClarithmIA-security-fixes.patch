@@ -1,0 +1,857 @@
+diff --git a/.env.example b/.env.example
+index 2fe50f6..5ff13ef 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,12 +4,16 @@ VITE_SUPABASE_ANON_KEY=
+ 
+ # Supabase Server / Netlify Functions (Backend ONLY - NEVER expose to frontend)
+ SUPABASE_URL=
++SUPABASE_ANON_KEY=
+ SUPABASE_SERVICE_ROLE_KEY=
++DEFAULT_ORGANIZATION_ID=
++WEBHOOK_ORGANIZATION_ID=
+ 
+ # Connectors and Integrations
+ INTERNAL_API_KEY=
+ TWITTER_BEARER_TOKEN=
+ TWITTER_USER_ID=
+ WEBHOOK_SECRET=
++WEBHOOK_SIGNING_SECRET=
+ ZENDESK_ACCESS_TOKEN=
+ ZENDESK_SUBDOMAIN=
+\ No newline at end of file
+diff --git a/SECURITY_TENANCY_REVIEW.md b/SECURITY_TENANCY_REVIEW.md
+new file mode 100644
+index 0000000..441a229
+--- /dev/null
++++ b/SECURITY_TENANCY_REVIEW.md
+@@ -0,0 +1,35 @@
++# Revisão das correções de segurança — ClarithmIA
++
++## Alterações incluídas
++
++- `netlify/lib/auth.ts`: remove aceitação de tokens `session_*` e leitura não verificada de claims JWT. Tokens Supabase são validados no endpoint Auth; a organização e a role são resolvidas por `organization_members`. Usuários sem associação são bloqueados, múltiplas associações exigem `x-organization-id` e `viewer` não pode alterar fontes.
++- `src/lib/supabase.ts`: deixa de fabricar um token de sessão falso quando o Supabase não está configurado ou não existe sessão.
++- `netlify/lib/sink.ts` e conectores: feedback é persistido com `organization_id`; deduplicação é feita por organização + `dedupe_key`; não há fallback silencioso para o tenant `default`.
++- `netlify/functions/webhooks-incoming.ts`: exige `WEBHOOK_ORGANIZATION_ID` quando a persistência está habilitada.
++- `netlify/lib/http.ts`: permite o cabeçalho `x-organization-id` no CORS.
++- `supabase/migrations/20261029000000_security_tenancy_hardening.sql`: endurece RLS, restringe execução das funções de tenancy, remove defaults implícitos e cria deduplicação por tenant.
++- Testes de autenticação atualizados para cobrir token inválido, membership, seleção de organização e papel viewer.
++
++## Variáveis necessárias no ambiente do servidor
++
++- `SUPABASE_URL`
++- `SUPABASE_ANON_KEY` (chave pública/anon do projeto, somente para validar usuário pelo Supabase Auth)
++- `SUPABASE_SERVICE_ROLE_KEY` (somente no servidor; nunca em `VITE_*`)
++- `DEFAULT_ORGANIZATION_ID` (ID real existente em `public.organizations`, para conectores internos)
++- `WEBHOOK_ORGANIZATION_ID` (ID real da organização dona do webhook)
++- `INTERNAL_API_KEY` e `WEBHOOK_SECRET` conforme as rotas utilizadas
++
++## Verificação realizada
++
++- Testes da API: **58 passaram, 0 falharam**.
++- Typecheck das Netlify Functions: **passou**.
++- Typecheck completo do frontend: não pôde ser validado neste ambiente porque as dependências de frontend (`react`, `@supabase/supabase-js` e tipos associados) não estão instaladas no ZIP; os erros observados são de dependências ausentes.
++
++## Atenção antes de produção
++
++1. A migração SQL foi adicionada ao projeto, mas **não foi executada** em nenhum banco.
++2. Antes de executar a migração, faça backup e confirme a ordem/histórico das migrações no projeto Supabase.
++3. Linhas antigas com `organization_id = 'default'` não são atribuídas automaticamente a uma organização. Faça uma análise e migração de dados controlada para organizações verificadas.
++4. Cadastre os IDs reais de organização e membros em `organizations` e `organization_members` antes de ativar a autenticação de usuários.
++5. Usuários pertencentes a mais de uma organização precisam enviar `x-organization-id`. A interface ainda não tem um seletor de organização; até implementá-lo, essas contas precisarão de integração de UI para enviar esse cabeçalho.
++6. A integração GitHub/Supabase remota não foi alterada. Todas as alterações estão somente neste pacote ZIP.
+diff --git a/netlify/README.md b/netlify/README.md
+index 0cce4ff..a3e18ee 100644
+--- a/netlify/README.md
++++ b/netlify/README.md
+@@ -25,7 +25,9 @@ há redirects no `netlify.toml`.
+   compatível com o filtro da Inbox, e os motivos) e `confidence`. É determinístico, então
+   dá para trocar `analyze()` por uma chamada de LLM sem mudar o contrato.
+ * **Persistência** (`lib/sink.ts`): se `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` existirem,
+-  faz *upsert* idempotente por `dedupe_key` (schema em `supabase/migrations`). Se a gravação
++  faz *upsert* idempotente por `organization_id + dedupe_key` (schema em `supabase/migrations`).
++  A persistência exige um `DEFAULT_ORGANIZATION_ID` real para conectores internos; o webhook usa
++  `WEBHOOK_ORGANIZATION_ID`. Não é permitido gravar implicitamente no tenant `default`. Se a gravação
+   falhar, a resposta é **502 `PERSISTENCE_FAILED` (retryable)** e o cursor **não avança**,
+   então nada se perde. Sem Supabase, só devolve os itens.
+ 
+@@ -77,6 +79,7 @@ Observação: a leitura de menções depende do **plano da X API**; planos sem a
+ 1. Valida o token do header (comparação em tempo constante, aceita rotação via `WEBHOOK_SECRETS=a,b`).
+ 2. Exige `Content-Type: application/json`, corpo ≤ `WEBHOOK_MAX_BODY_BYTES` (256 KB) e ≤ `WEBHOOK_MAX_ITEMS` itens (100).
+ 3. Se `WEBHOOK_SIGNING_SECRET` existir, também exige `x-signature: sha256=<hmac hex do corpo bruto>`.
++4. Com persistência habilitada, `WEBHOOK_ORGANIZATION_ID` é obrigatório para associar os dados ao tenant correto.
+ 4. Aceita um objeto, um array, ou `{ items | data | feedback | events | records: [...] }`.
+ 5. Mapeia campos livres: texto (`text|message|body|content|comment|review|feedback|description`),
+    id (`id|external_id|ticket_id|review_id|uuid`; se faltar, gera um hash estável), data, autor
+@@ -156,3 +159,20 @@ Aplique `supabase/migrations/20261025000000_feedback.sql` se for persistir.
+ * O cache `username → id` da X vive na instância da function (some em *cold start*).
+ * A gravação no Supabase usa a API REST (PostgREST) e **não foi testada contra um banco real**;
+   os testes a cobrem com `fetch` simulado.
++
++
++## Segurança de autenticação e multi-tenancy
++
++- `/api/sources` não aceita mais tokens `session_*` nem decodifica JWTs por conta própria.
++  O token Bearer é validado pelo endpoint `/auth/v1/user` do Supabase; a organização e o papel
++  são carregados de `public.organization_members`, nunca de claims enviados pelo navegador.
++- Configure no ambiente do servidor `SUPABASE_URL`, `SUPABASE_ANON_KEY` e
++  `SUPABASE_SERVICE_ROLE_KEY`. A chave `service_role` deve existir somente no backend.
++- Para rotas internas que persistem feedback, configure `DEFAULT_ORGANIZATION_ID` com um ID
++  existente em `public.organizations`. Configure `WEBHOOK_ORGANIZATION_ID` para o tenant que
++  possui o endpoint de webhook. Não use `default`.
++- Usuários que pertencem a várias organizações devem enviar `x-organization-id`; o backend
++  confirma a associação antes de permitir o acesso. A role `viewer` não pode modificar fontes.
++- A migração `20261029000000_security_tenancy_hardening.sql` reforça RLS e escopo da deduplicação.
++  Linhas antigas marcadas como `default` não são atribuídas automaticamente a uma empresa:
++  revise-as e associe-as manualmente a uma organização verificada antes de disponibilizá-las.
+diff --git a/netlify/functions/connectors-twitter.ts b/netlify/functions/connectors-twitter.ts
+index c95bf39..0d9f553 100644
+--- a/netlify/functions/connectors-twitter.ts
++++ b/netlify/functions/connectors-twitter.ts
+@@ -146,7 +146,7 @@ export default createHandler({
+       let persistTarget: 'supabase' | 'none' = 'none';
+       if (!dryRun) {
+         try {
+-          const persisted = await persistFeedback(processed, { log, deadlineAt });
++          const persisted = await persistFeedback(processed, { log, deadlineAt, organizationId: optionalEnv('DEFAULT_ORGANIZATION_ID') });
+           tracker.counts.persisted = persisted.persisted;
+           persistTarget = persisted.target;
+         } catch (err) {
+diff --git a/netlify/functions/connectors-zendesk.ts b/netlify/functions/connectors-zendesk.ts
+index fad8b6f..58d8579 100644
+--- a/netlify/functions/connectors-zendesk.ts
++++ b/netlify/functions/connectors-zendesk.ts
+@@ -147,7 +147,7 @@ export default createHandler({
+       let persistTarget: 'supabase' | 'none' = 'none';
+       if (!dryRun) {
+         try {
+-          const persisted = await persistFeedback(processed, { log, deadlineAt });
++          const persisted = await persistFeedback(processed, { log, deadlineAt, organizationId: optionalEnv('DEFAULT_ORGANIZATION_ID') });
+           tracker.counts.persisted = persisted.persisted;
+           persistTarget = persisted.target;
+         } catch (err) {
+diff --git a/netlify/functions/webhooks-incoming.ts b/netlify/functions/webhooks-incoming.ts
+index 9d96ca9..317c007 100644
+--- a/netlify/functions/webhooks-incoming.ts
++++ b/netlify/functions/webhooks-incoming.ts
+@@ -1,10 +1,10 @@
+ import { verifySignature } from '../lib/auth.ts';
+ import { intEnv, optionalEnv } from '../lib/env.ts';
+-import { AppError, badRequest, payloadTooLarge, toAppError, unprocessable, unsupportedMediaType } from '../lib/errors.ts';
++import { AppError, badRequest, configError, payloadTooLarge, toAppError, unprocessable, unsupportedMediaType } from '../lib/errors.ts';
+ import { createHandler } from '../lib/http.ts';
+ import { analyzeBatch } from '../lib/ai.ts';
+ import { normalizeWebhookItem } from '../lib/normalize.ts';
+-import { persistFeedback } from '../lib/sink.ts';
++import { isPersistenceConfigured, persistFeedback } from '../lib/sink.ts';
+ import { startSync } from '../lib/sync.ts';
+ import type { NormalizedFeedback } from '../lib/types.ts';
+ 
+@@ -93,7 +93,15 @@ export default createHandler({
+ 
+       let persistTarget: 'supabase' | 'none' = 'none';
+       try {
+-        const persisted = await persistFeedback(processed, { log, deadlineAt });
++        const webhookOrganizationId = optionalEnv('WEBHOOK_ORGANIZATION_ID');
++        if (isPersistenceConfigured() && !webhookOrganizationId) {
++          throw configError('WEBHOOK_ORGANIZATION_ID');
++        }
++        const persisted = await persistFeedback(processed, {
++          log,
++          deadlineAt,
++          ...(webhookOrganizationId ? { organizationId: webhookOrganizationId } : {}),
++        });
+         tracker.counts.persisted = persisted.persisted;
+         persistTarget = persisted.target;
+       } catch (err) {
+diff --git a/netlify/lib/auth.ts b/netlify/lib/auth.ts
+index fbb9113..e8561eb 100644
+--- a/netlify/lib/auth.ts
++++ b/netlify/lib/auth.ts
+@@ -1,5 +1,5 @@
+-import { listEnv } from './env.ts';
+-import { configError, unauthorized } from './errors.ts';
++import { listEnv, optionalEnv } from './env.ts';
++import { AppError, configError, unauthorized } from './errors.ts';
+ 
+ const encoder = new TextEncoder();
+ 
+@@ -67,6 +67,7 @@ export async function hmacSha256Hex(secret: string, message: string): Promise<st
+ export async function verifySignature(rawBody: string, header: string | null, secret: string): Promise<boolean> {
+   if (!header) return false;
+   const provided = header.trim().replace(/^sha256=/i, '').toLowerCase();
++  if (!/^[a-f0-9]{64}$/.test(provided)) return false;
+   const expected = await hmacSha256Hex(secret, rawBody);
+   return constantTimeEqual(provided, expected);
+ }
+@@ -78,44 +79,129 @@ export async function sha256Hex(value: string): Promise<string> {
+ export interface SourcesAuthIdentity {
+   orgId: string;
+   role: 'admin' | 'editor' | 'viewer';
+-  source: 'internal_key' | 'session' | 'supabase_token';
++  source: 'internal_key' | 'supabase_token';
+ }
+ 
+-/** Authenticates callers accessing the sources persistence endpoints. */
++function supabaseConfiguration() {
++  const url = optionalEnv('SUPABASE_URL')?.replace(/\/+$/, '');
++  const serviceKey = optionalEnv('SUPABASE_SERVICE_ROLE_KEY');
++  const anonKey = optionalEnv('SUPABASE_ANON_KEY') ?? optionalEnv('VITE_SUPABASE_ANON_KEY');
++  if (!url) throw configError('SUPABASE_URL');
++  if (!serviceKey) throw configError('SUPABASE_SERVICE_ROLE_KEY');
++  if (!anonKey) throw configError('SUPABASE_ANON_KEY');
++  return { url, serviceKey, anonKey };
++}
++
++async function supabaseRequest(url: string, key: string, token?: string): Promise<Response> {
++  return fetch(url, {
++    method: 'GET',
++    headers: {
++      apikey: key,
++      authorization: `Bearer ${token ?? key}`,
++      accept: 'application/json',
++    },
++  });
++}
++
++/**
++ * Authenticates the bearer token against Supabase Auth, then resolves tenancy
++ * from organization_members. JWT claims supplied by the browser are never
++ * used as an organization or role source.
++ */
++async function authenticateSupabaseUser(token: string, requestedOrgId: string | null): Promise<SourcesAuthIdentity> {
++  const { url, serviceKey, anonKey } = supabaseConfiguration();
++
++  let authResponse: Response;
++  try {
++    authResponse = await supabaseRequest(`${url}/auth/v1/user`, anonKey, token);
++  } catch {
++    throw new AppError(503, 'AUTH_PROVIDER_UNAVAILABLE', 'Authentication provider is unavailable.', { retryable: true });
++  }
++  if (!authResponse.ok) throw unauthorized('Invalid or expired Supabase access token.');
++
++  let user: { id?: unknown; app_metadata?: unknown };
++  try {
++    user = await authResponse.json() as { id?: unknown; app_metadata?: unknown };
++  } catch {
++    throw unauthorized('Invalid Supabase user response.');
++  }
++  if (typeof user.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(user.id)) {
++    throw unauthorized('Supabase did not return a valid user identity.');
++  }
++
++  const membersUrl = new URL(`${url}/rest/v1/organization_members`);
++  membersUrl.searchParams.set('user_id', `eq.${user.id}`);
++  membersUrl.searchParams.set('select', 'organization_id,role');
++  if (requestedOrgId) membersUrl.searchParams.set('organization_id', `eq.${requestedOrgId}`);
++
++  let membersResponse: Response;
++  try {
++    membersResponse = await fetch(membersUrl, {
++      method: 'GET',
++      headers: {
++        apikey: serviceKey,
++        authorization: `Bearer ${serviceKey}`,
++        accept: 'application/json',
++      },
++    });
++  } catch {
++    throw new AppError(503, 'TENANCY_PROVIDER_UNAVAILABLE', 'Organization membership could not be verified.', { retryable: true });
++  }
++  if (!membersResponse.ok) {
++    throw new AppError(503, 'TENANCY_LOOKUP_FAILED', 'Organization membership could not be verified.', { retryable: true });
++  }
++
++  let memberships: Array<{ organization_id?: unknown; role?: unknown }>;
++  try {
++    memberships = await membersResponse.json() as Array<{ organization_id?: unknown; role?: unknown }>;
++  } catch {
++    throw new AppError(503, 'TENANCY_LOOKUP_FAILED', 'Organization membership response was invalid.', { retryable: true });
++  }
++
++  const valid = memberships.filter((item) =>
++    typeof item.organization_id === 'string' &&
++    ['admin', 'editor', 'viewer'].includes(String(item.role))
++  );
++  if (valid.length === 0) throw new AppError(403, 'ORGANIZATION_ACCESS_DENIED', 'You are not a member of this organization.', { retryable: false });
++  if (!requestedOrgId && valid.length !== 1) {
++    throw new AppError(400, 'ORGANIZATION_REQUIRED', 'Select an organization using the x-organization-id header.', { retryable: false });
++  }
++  if (valid.length !== 1) throw new AppError(403, 'ORGANIZATION_ACCESS_DENIED', 'You do not have access to the requested organization.', { retryable: false });
++
++  const membership = valid[0]!;
++  return {
++    orgId: membership.organization_id as string,
++    role: membership.role as SourcesAuthIdentity['role'],
++    source: 'supabase_token',
++  };
++}
++
++/** Authenticates source requests and resolves the organization from trusted membership data. */
+ export async function requireSourcesAuth(req: Request): Promise<SourcesAuthIdentity> {
+   const internalSecrets = listEnv('INTERNAL_API_KEYS', 'INTERNAL_API_KEY');
+   const candidate = readBearerOrHeader(req, 'x-api-key');
++  const authorization = req.headers.get('authorization')?.trim();
++  const bearerMatch = authorization ? /^Bearer\s+(.+)$/i.exec(authorization) : null;
++  const token = bearerMatch?.[1]?.trim();
+ 
+   if (candidate && internalSecrets.length > 0 && (await matchesAnySecret(candidate, internalSecrets))) {
+-    return { orgId: 'default', role: 'admin', source: 'internal_key' };
++    const orgId = req.headers.get('x-organization-id')?.trim() || optionalEnv('DEFAULT_ORGANIZATION_ID');
++    if (!orgId || orgId === 'default') throw configError('DEFAULT_ORGANIZATION_ID (must be a real organization ID)');
++    return { orgId, role: 'admin', source: 'internal_key' };
++  }
++  if (token && internalSecrets.length > 0 && (await matchesAnySecret(token, internalSecrets))) {
++    const orgId = req.headers.get('x-organization-id')?.trim() || optionalEnv('DEFAULT_ORGANIZATION_ID');
++    if (!orgId || orgId === 'default') throw configError('DEFAULT_ORGANIZATION_ID (must be a real organization ID)');
++    return { orgId, role: 'admin', source: 'internal_key' };
+   }
+ 
+-  const authHeader = req.headers.get('authorization')?.trim();
+-  if (authHeader) {
+-    const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader);
+-    if (bearerMatch?.[1]) {
+-      const token = bearerMatch[1].trim();
+-      if (internalSecrets.length > 0 && (await matchesAnySecret(token, internalSecrets))) {
+-        return { orgId: 'default', role: 'admin', source: 'internal_key' };
+-      }
+-      if (/^session_([a-z0-9_-]+)(?:_.+)?$/i.test(token)) {
+-        const match = /^session_([a-z0-9_-]+)(?:_.+)?$/i.exec(token);
+-        const orgId = match?.[1] ? match[1].toLowerCase() : 'default';
+-        return { orgId, role: 'admin', source: 'session' };
+-      }
+-      const jwtParts = token.split('.');
+-      if (jwtParts.length === 3 && jwtParts[1]) {
+-        try {
+-          const payloadJson = atob(jwtParts[1].replace(/-/g, '+').replace(/_/g, '/'));
+-          const payload = JSON.parse(payloadJson);
+-          const orgId = typeof payload.organization_id === 'string' && payload.organization_id ? payload.organization_id : 'default';
+-          return { orgId, role: 'admin', source: 'supabase_token' };
+-        } catch {
+-          // Fall through to unauthorized
+-        }
+-      }
+-    }
++  if (!token || /^session_/i.test(token) || token.split('.').length !== 3) {
++    throw unauthorized('A valid Supabase access token is required.');
+   }
+ 
+-  throw unauthorized('Authentication required to access integration sources.');
++  const identity = await authenticateSupabaseUser(token, req.headers.get('x-organization-id')?.trim() || null);
++  if (req.method !== 'GET' && identity.role === 'viewer') {
++    throw new AppError(403, 'INSUFFICIENT_ROLE', 'Viewer role cannot modify integration sources.', { retryable: false });
++  }
++  return identity;
+ }
+diff --git a/netlify/lib/http.ts b/netlify/lib/http.ts
+index c3bbd83..1fbe47b 100644
+--- a/netlify/lib/http.ts
++++ b/netlify/lib/http.ts
+@@ -28,7 +28,7 @@ function corsHeaders(req: Request): Record<string, string> {
+   return {
+     'access-control-allow-origin': allowed.includes('*') ? '*' : origin,
+     'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+-    'access-control-allow-headers': 'authorization, content-type, x-api-key, x-request-id, x-webhook-token, x-signature',
++    'access-control-allow-headers': 'authorization, content-type, x-api-key, x-organization-id, x-request-id, x-webhook-token, x-signature',
+     'access-control-max-age': '600',
+     vary: 'origin',
+   };
+diff --git a/netlify/lib/sink.ts b/netlify/lib/sink.ts
+index 659616e..0e86bb6 100644
+--- a/netlify/lib/sink.ts
++++ b/netlify/lib/sink.ts
+@@ -1,4 +1,5 @@
+ import { fetchJson } from './http-client.ts';
++import { configError } from './errors.ts';
+ import { optionalEnv } from './env.ts';
+ import type { Logger } from './logger.ts';
+ import type { ProcessedFeedback } from './types.ts';
+@@ -12,8 +13,9 @@ export function isPersistenceConfigured(): boolean {
+   return Boolean(optionalEnv('SUPABASE_URL') && optionalEnv('SUPABASE_SERVICE_ROLE_KEY'));
+ }
+ 
+-function toRow(item: ProcessedFeedback): Record<string, unknown> {
++function toRow(item: ProcessedFeedback, organizationId: string): Record<string, unknown> {
+   return {
++    organization_id: organizationId,
+     dedupe_key: item.dedupeKey,
+     source: item.source,
+     channel: item.channel,
+@@ -43,19 +45,26 @@ function toRow(item: ProcessedFeedback): Record<string, unknown> {
+ }
+ 
+ /**
+- * Idempotent upsert into Supabase (PostgREST) keyed by `dedupe_key`.
+- * When Supabase is not configured the items are simply returned to the caller.
++ * Idempotent tenant-scoped upsert into Supabase. A configured organization is
++ * mandatory whenever persistence is enabled; records never silently fall into
++ * a shared "default" tenant.
+  */
+ export async function persistFeedback(
+   items: readonly ProcessedFeedback[],
+-  ctx: { log: Logger; deadlineAt: number; fetchImpl?: typeof fetch },
++  ctx: { log: Logger; deadlineAt: number; organizationId?: string; fetchImpl?: typeof fetch },
+ ): Promise<PersistResult> {
+   const url = optionalEnv('SUPABASE_URL');
+   const key = optionalEnv('SUPABASE_SERVICE_ROLE_KEY');
+   if (!url || !key || items.length === 0) return { target: 'none', persisted: 0 };
+ 
++  const organizationId = ctx.organizationId?.trim() || optionalEnv('DEFAULT_ORGANIZATION_ID');
++  if (!organizationId) throw configError('DEFAULT_ORGANIZATION_ID');
++  if (organizationId === 'default') {
++    throw configError('DEFAULT_ORGANIZATION_ID (must be a real organization ID)');
++  }
++
+   const table = optionalEnv('SUPABASE_FEEDBACK_TABLE') ?? 'feedback';
+-  const endpoint = `${url.replace(/\/+$/, '')}/rest/v1/${encodeURIComponent(table)}?on_conflict=dedupe_key`;
++  const endpoint = `${url.replace(/\/+$/, '')}/rest/v1/${encodeURIComponent(table)}?on_conflict=organization_id,dedupe_key`;
+   let persisted = 0;
+ 
+   for (let i = 0; i < items.length; i += 100) {
+@@ -69,13 +78,13 @@ export async function persistFeedback(
+         authorization: `Bearer ${key}`,
+         prefer: 'resolution=merge-duplicates,return=minimal',
+       },
+-      body: chunk.map(toRow),
++      body: chunk.map((item) => toRow(item, organizationId)),
+       deadlineAt: ctx.deadlineAt,
+       log: ctx.log,
+       ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+     });
+     persisted += chunk.length;
+   }
+-  ctx.log.info('persist.completed', { target: 'supabase', table, persisted });
++  ctx.log.info('persist.completed', { target: 'supabase', table, organizationId, persisted });
+   return { target: 'supabase', persisted };
+ }
+diff --git a/netlify/tests/api.test.ts b/netlify/tests/api.test.ts
+index 17291bb..52e810d 100644
+--- a/netlify/tests/api.test.ts
++++ b/netlify/tests/api.test.ts
+@@ -134,9 +134,11 @@ describe('POST /api/webhooks/incoming', () => {
+       const json = await body(res);
+       assert.equal(json.persistedTo, 'supabase');
+       assert.equal(ok.calls.length, 1);
+-      assert.ok(ok.calls[0]!.url.includes('/rest/v1/feedback?on_conflict=dedupe_key'));
++      assert.ok(ok.calls[0]!.url.includes('/rest/v1/feedback?on_conflict=organization_id,dedupe_key'));
+       assert.equal(ok.calls[0]!.headers.prefer, 'resolution=merge-duplicates,return=minimal');
+-      assert.equal(JSON.parse(ok.calls[0]!.body ?? '[]')[0].sentiment_label, 'positive');
++      const persistedRow = JSON.parse(ok.calls[0]!.body ?? '[]')[0];
++      assert.equal(persistedRow.sentiment_label, 'positive');
++      assert.equal(persistedRow.organization_id, 'org_test_default');
+       ok.restore();
+ 
+       const failing = mockFetch(() => jsonResponse({ message: 'down' }, 400));
+diff --git a/netlify/tests/auth.test.ts b/netlify/tests/auth.test.ts
+index 4a2a8c1..169e912 100644
+--- a/netlify/tests/auth.test.ts
++++ b/netlify/tests/auth.test.ts
+@@ -1,121 +1,143 @@
+ import assert from 'node:assert/strict';
+ import { afterEach, beforeEach, describe, it } from 'node:test';
+ import { requireSourcesAuth } from '../lib/auth.ts';
+-import sources from '../functions/sources.ts';
+-import { BASE_ENV, INTERNAL_KEY, setEnv } from './helpers.ts';
++import { BASE_ENV, INTERNAL_KEY, jsonResponse, mockFetch, setEnv } from './helpers.ts';
+ 
+ let restoreEnv: () => void = () => {};
++let restoreFetch: () => void = () => {};
+ 
+ beforeEach(() => {
+-  restoreEnv = setEnv(BASE_ENV);
++  restoreEnv = setEnv({
++    ...BASE_ENV,
++    SUPABASE_URL: 'https://mock.supabase.co',
++    SUPABASE_SERVICE_ROLE_KEY: 'mock-service-role-key',
++    SUPABASE_ANON_KEY: 'mock-anon-key',
++  });
+ });
+ 
+ afterEach(() => {
+   restoreEnv();
++  restoreFetch();
++  restoreFetch = () => {};
+ });
+ 
+-function createMockSupabaseJwt(payload: Record<string, unknown>): string {
+-  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g, '');
+-  const body = btoa(JSON.stringify(payload)).replace(/=/g, '');
+-  const signature = 'mock_signature_test_hash';
+-  return `${header}.${body}.${signature}`;
+-}
++const userId = '11111111-1111-4111-8111-111111111111';
++const validLookingJwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJl';
+ 
+-describe('Authentication & JWT Session Verification', () => {
+-  it('rejects requests with missing or empty Authorization header', async () => {
+-    const req = new Request('https://x.test/api/sources', { method: 'GET' });
++describe('Authentication & tenant membership verification', () => {
++  it('rejects requests with missing Authorization header', async () => {
+     await assert.rejects(
+-      async () => {
+-        await requireSourcesAuth(req);
+-      },
+-      (err: any) => {
+-        assert.equal(err.status, 401);
+-        assert.equal(err.code, 'UNAUTHORIZED');
+-        return true;
+-      }
++      () => requireSourcesAuth(new Request('https://x.test/api/sources')),
++      (err: any) => err.status === 401 && err.code === 'UNAUTHORIZED',
+     );
+   });
+ 
+-  it('rejects malformed or incomplete bearer tokens', async () => {
+-    const req = new Request('https://x.test/api/sources', {
+-      method: 'GET',
+-      headers: { authorization: 'Bearer invalid.token' },
+-    });
+-    await assert.rejects(
+-      async () => {
+-        await requireSourcesAuth(req);
+-      },
+-      (err: any) => {
+-        assert.equal(err.status, 401);
+-        return true;
+-      }
+-    );
++  it('rejects malformed bearer tokens and fake session tokens', async () => {
++    for (const token of ['invalid.token', 'session_default_clarithmia']) {
++      await assert.rejects(
++        () => requireSourcesAuth(new Request('https://x.test/api/sources', {
++          headers: { authorization: `Bearer ${token}` },
++        })),
++        (err: any) => err.status === 401,
++      );
++    }
+   });
+ 
+-  it('accepts valid Supabase JWT token and extracts organization_id tenancy', async () => {
+-    const jwt = createMockSupabaseJwt({
+-      sub: 'user_12345_uuid',
+-      email: 'engineer@corp.com',
+-      role: 'authenticated',
+-      organization_id: 'org_acme_corp',
++  it('resolves organization and role from verified membership, not JWT claims', async () => {
++    const m = mockFetch((url) => {
++      if (url.pathname === '/auth/v1/user') {
++        return jsonResponse({ id: userId, app_metadata: { organization_id: 'attacker_org', role: 'admin' } });
++      }
++      if (url.pathname === '/rest/v1/organization_members') {
++        assert.match(url.search, /user_id=eq\./);
++        assert.match(url.search, /organization_id=eq\.org_acme/);
++        return jsonResponse([{ organization_id: 'org_acme', role: 'editor' }]);
++      }
++      return jsonResponse({ error: 'not found' }, 404);
+     });
++    restoreFetch = m.restore;
+ 
+-    const req = new Request('https://x.test/api/sources', {
++    const identity = await requireSourcesAuth(new Request('https://x.test/api/sources', {
+       method: 'GET',
+-      headers: { authorization: `Bearer ${jwt}` },
+-    });
++      headers: {
++        authorization: `Bearer ${validLookingJwt}`,
++        'x-organization-id': 'org_acme',
++      },
++    }));
+ 
+-    const identity = await requireSourcesAuth(req);
+     assert.equal(identity.source, 'supabase_token');
+-    assert.equal(identity.orgId, 'org_acme_corp');
+-    assert.equal(identity.role, 'admin');
++    assert.equal(identity.orgId, 'org_acme');
++    assert.equal(identity.role, 'editor');
++    assert.equal(m.calls.length, 2);
+   });
+ 
+-  it('defaults to default orgId when Supabase JWT does not specify organization_id', async () => {
+-    const jwt = createMockSupabaseJwt({
+-      sub: 'user_99999_uuid',
+-      email: 'member@startup.io',
+-      role: 'authenticated',
+-    });
++  it('rejects an access token that Supabase Auth does not validate', async () => {
++    const m = mockFetch((url) => url.pathname === '/auth/v1/user'
++      ? jsonResponse({ message: 'invalid token' }, 401)
++      : jsonResponse([], 200));
++    restoreFetch = m.restore;
+ 
+-    const req = new Request('https://x.test/api/sources', {
+-      method: 'GET',
+-      headers: { authorization: `Bearer ${jwt}` },
+-    });
++    await assert.rejects(
++      () => requireSourcesAuth(new Request('https://x.test/api/sources', {
++        headers: { authorization: `Bearer ${validLookingJwt}`, 'x-organization-id': 'org_acme' },
++      })),
++      (err: any) => err.status === 401 && err.code === 'UNAUTHORIZED',
++    );
++  });
+ 
+-    const identity = await requireSourcesAuth(req);
+-    assert.equal(identity.source, 'supabase_token');
+-    assert.equal(identity.orgId, 'default');
++  it('rejects users who do not belong to the requested organization', async () => {
++    const m = mockFetch((url) => url.pathname === '/auth/v1/user'
++      ? jsonResponse({ id: userId })
++      : jsonResponse([], 200));
++    restoreFetch = m.restore;
++
++    await assert.rejects(
++      () => requireSourcesAuth(new Request('https://x.test/api/sources', {
++        headers: { authorization: `Bearer ${validLookingJwt}`, 'x-organization-id': 'org_other' },
++      })),
++      (err: any) => err.status === 403 && err.code === 'ORGANIZATION_ACCESS_DENIED',
++    );
+   });
+ 
+-  it('allows access to sources endpoint with real Supabase JWT format', async () => {
+-    const jwt = createMockSupabaseJwt({
+-      sub: 'test_user_789',
+-      email: 'admin@clarithmia.ai',
+-      role: 'authenticated',
+-      organization_id: 'tenant_primary',
+-    });
++  it('requires an organization selection when the user belongs to multiple organizations', async () => {
++    const m = mockFetch((url) => url.pathname === '/auth/v1/user'
++      ? jsonResponse({ id: userId })
++      : jsonResponse([
++          { organization_id: 'org_a', role: 'viewer' },
++          { organization_id: 'org_b', role: 'admin' },
++        ], 200));
++    restoreFetch = m.restore;
+ 
+-    const req = new Request('https://x.test/api/sources', {
+-      method: 'GET',
+-      headers: { authorization: `Bearer ${jwt}` },
+-    });
++    await assert.rejects(
++      () => requireSourcesAuth(new Request('https://x.test/api/sources', {
++        headers: { authorization: `Bearer ${validLookingJwt}` },
++      })),
++      (err: any) => err.status === 400 && err.code === 'ORGANIZATION_REQUIRED',
++    );
++  });
+ 
+-    const res = await sources(req);
+-    assert.equal(res.status, 200);
+-    const body = await res.json();
+-    assert.equal(body.ok, true);
+-    assert.ok(Array.isArray(body.sources));
++  it('does not allow viewer role to modify sources', async () => {
++    const m = mockFetch((url) => url.pathname === '/auth/v1/user'
++      ? jsonResponse({ id: userId })
++      : jsonResponse([{ organization_id: 'org_acme', role: 'viewer' }], 200));
++    restoreFetch = m.restore;
++
++    await assert.rejects(
++      () => requireSourcesAuth(new Request('https://x.test/api/sources', {
++        method: 'POST',
++        headers: { authorization: `Bearer ${validLookingJwt}`, 'x-organization-id': 'org_acme' },
++      })),
++      (err: any) => err.status === 403 && err.code === 'INSUFFICIENT_ROLE',
++    );
+   });
+ 
+-  it('maintains compatibility with internal API key for server jobs and schedulers', async () => {
+-    const req = new Request('https://x.test/api/sources', {
++  it('supports trusted server-to-server calls using the internal API key', async () => {
++    const identity = await requireSourcesAuth(new Request('https://x.test/api/sources', {
+       method: 'GET',
+       headers: { 'x-api-key': INTERNAL_KEY },
+-    });
+-
+-    const identity = await requireSourcesAuth(req);
++    }));
+     assert.equal(identity.source, 'internal_key');
+-    assert.equal(identity.orgId, 'default');
++    assert.equal(identity.orgId, 'org_test_default');
++    assert.equal(identity.role, 'admin');
+   });
+ });
+diff --git a/netlify/tests/helpers.ts b/netlify/tests/helpers.ts
+index 1598069..760a820 100644
+--- a/netlify/tests/helpers.ts
++++ b/netlify/tests/helpers.ts
+@@ -18,6 +18,9 @@ export function setEnv(values: Record<string, string | undefined>): () => void {
+ 
+ export const BASE_ENV: Record<string, string | undefined> = {
+   INTERNAL_API_KEY: INTERNAL_KEY,
++  DEFAULT_ORGANIZATION_ID: 'org_test_default',
++  WEBHOOK_ORGANIZATION_ID: 'org_test_default',
++  SUPABASE_ANON_KEY: 'mock-anon-key',
+   WEBHOOK_SECRET: WEBHOOK_SECRET,
+   WEBHOOK_SIGNING_SECRET: undefined,
+   ZENDESK_SUBDOMAIN: 'acme',
+diff --git a/netlify/tests/sources.test.ts b/netlify/tests/sources.test.ts
+index d4bfef5..35daa53 100644
+--- a/netlify/tests/sources.test.ts
++++ b/netlify/tests/sources.test.ts
+@@ -18,7 +18,7 @@ afterEach(() => {
+ });
+ 
+ const internalAuth = { 'x-api-key': INTERNAL_KEY };
+-const sessionAuth = { authorization: 'Bearer session_default_test' };
++const sessionAuth = internalAuth;
+ 
+ async function parseBody(res: Response): Promise<any> {
+   return res.json();
+@@ -63,7 +63,7 @@ describe('Sources API (/api/sources)', () => {
+               feedbacks_count: 42,
+               last_sync_at: '2026-10-27T10:00:00Z',
+               config_metadata: { endpointUrl: '/api/webhooks/incoming' },
+-              organization_id: 'default',
++              organization_id: 'org_test_default',
+             },
+           ]);
+         }
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+index b24e4a0..6bd626e 100644
+--- a/src/lib/supabase.ts
++++ b/src/lib/supabase.ts
+@@ -31,21 +31,22 @@ export const supabase: SupabaseClient = createClient(
+ );
+ 
+ /**
+- * Returns the current authenticated access_token from the Supabase session,
+- * or a safe default bearer session token when unconfigured or in local demo mode.
++ * Returns only a real Supabase access token. Demo/fallback credentials are
++ * deliberately not generated: the backend must reject unauthenticated calls.
+  */
+ export async function getAuthToken(): Promise<string> {
+-  if (isSupabaseConfigured()) {
+-    try {
+-      const { data } = await supabase.auth.getSession();
+-      if (data?.session?.access_token) {
+-        return data.session.access_token;
+-      }
+-    } catch (err) {
+-      console.warn('[ClarithmIA Auth] Error obtaining session token:', err);
++  if (!isSupabaseConfigured()) return '';
++  try {
++    const { data, error } = await supabase.auth.getSession();
++    if (error) {
++      console.warn('[ClarithmIA Auth] Error obtaining session token:', error.message);
++      return '';
+     }
++    return data?.session?.access_token ?? '';
++  } catch (err) {
++    console.warn('[ClarithmIA Auth] Error obtaining session token:', err);
++    return '';
+   }
+-  return 'session_default_clarithmia';
+ }
+ 
+ export type { Session };
+diff --git a/supabase/migrations/20261029000000_security_tenancy_hardening.sql b/supabase/migrations/20261029000000_security_tenancy_hardening.sql
+new file mode 100644
+index 0000000..1f750f0
+--- /dev/null
++++ b/supabase/migrations/20261029000000_security_tenancy_hardening.sql
+@@ -0,0 +1,103 @@
++-- ClarithmIA security hardening: strict organization membership, tenant-scoped dedupe,
++-- and no implicit "default" tenant. Review legacy rows before assigning them to an org.
++
++begin;
++
++-- The application/backend must always provide an explicit organization_id for new rows.
++alter table public.sources alter column organization_id drop default;
++alter table public.feedback
++  add column if not exists organization_id text;
++update public.feedback set organization_id = 'default' where organization_id is null;
++alter table public.feedback alter column organization_id set not null;
++alter table public.feedback alter column organization_id drop default;
++
++-- Deduplication must be scoped to a tenant, not global across all organizations.
++drop index if exists public.feedback_dedupe_key_uidx;
++create unique index if not exists feedback_org_dedupe_key_uidx
++  on public.feedback (organization_id, dedupe_key);
++create index if not exists feedback_org_created_idx
++  on public.feedback (organization_id, created_at desc);
++
++-- Keep membership lookup functions narrowly scoped and safe from search_path hijacking.
++create or replace function public.current_user_org_ids()
++returns setof text
++language sql
++security definer
++stable
++set search_path = ''
++as $function$
++  select om.organization_id
++  from public.organization_members as om
++  where om.user_id = (select auth.uid());
++$function$;
++
++create or replace function public.user_has_org_role(target_org_id text, min_role text)
++returns boolean
++language sql
++security definer
++stable
++set search_path = ''
++as $function$
++  select coalesce(bool_or(
++    case min_role
++      when 'viewer' then om.role in ('admin', 'editor', 'viewer')
++      when 'editor' then om.role in ('admin', 'editor')
++      when 'admin' then om.role = 'admin'
++      else false
++    end
++  ), false)
++  from public.organization_members as om
++  where om.organization_id = target_org_id
++    and om.user_id = (select auth.uid());
++$function$;
++
++revoke all on function public.current_user_org_ids() from public, anon;
++revoke all on function public.user_has_org_role(text, text) from public, anon;
++grant execute on function public.current_user_org_ids() to authenticated;
++grant execute on function public.user_has_org_role(text, text) to authenticated;
++
++alter table public.organizations enable row level security;
++alter table public.organization_members enable row level security;
++alter table public.sources enable row level security;
++alter table public.feedback enable row level security;
++
++drop policy if exists org_members_select_own on public.organization_members;
++create policy org_members_select_own
++  on public.organization_members
++  for select to authenticated
++  using (user_id = (select auth.uid()));
++
++drop policy if exists org_select_own on public.organizations;
++create policy org_select_own
++  on public.organizations
++  for select to authenticated
++  using (id in (select public.current_user_org_ids()));
++
++drop policy if exists "Allow authenticated read sources" on public.sources;
++drop policy if exists "sources_tenant_isolation_select" on public.sources;
++drop policy if exists "sources_tenant_isolation_modify" on public.sources;
++drop policy if exists "Allow service role full access to sources" on public.sources;
++
++create policy sources_tenant_isolation_select
++  on public.sources
++  for select to authenticated
++  using (organization_id in (select public.current_user_org_ids()));
++
++create policy sources_tenant_isolation_modify
++  on public.sources
++  for all to authenticated
++  using (public.user_has_org_role(organization_id, 'editor'))
++  with check (public.user_has_org_role(organization_id, 'editor'));
++
++drop policy if exists feedback_tenant_isolation_select on public.feedback;
++drop policy if exists feedback_service_role_all on public.feedback;
++create policy feedback_tenant_isolation_select
++  on public.feedback
++  for select to authenticated
++  using (organization_id in (select public.current_user_org_ids()));
++
++commit;
++
++-- IMPORTANT: existing rows with organization_id = 'default' are deliberately not
++-- assigned to any customer. Review and reassign them manually to a verified
++-- organization before relying on them in the tenant UI.
