@@ -10,6 +10,7 @@ import {
   type PlatformId,
   type StatusId,
 } from '@/components/platforms';
+import { getAuthToken } from '@/lib/supabase';
 
 type SourceRow = {
   platform: PlatformId;
@@ -67,10 +68,11 @@ function SourcesView({ t }: { t: Translation }) {
     setLoadError(null);
 
     try {
+      const token = await getAuthToken();
       const response = await fetch('/api/sources', {
         method: 'GET',
         headers: {
-          authorization: 'Bearer session_default_clarithmia',
+          authorization: `Bearer ${token}`,
         },
         signal: ac.signal,
       });
@@ -125,11 +127,12 @@ function SourcesView({ t }: { t: Translation }) {
     setFeedbackNotice(null);
 
     try {
+      const token = await getAuthToken();
       const response = await fetch('/api/sources', {
         method: 'PATCH',
         headers: {
           'content-type': 'application/json',
-          authorization: 'Bearer session_default_clarithmia',
+          authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           platform,

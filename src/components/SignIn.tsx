@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Language, Translation } from '@/i18n';
 import { AuIcon, AuPasswordField, AuthShell, auEmailOk } from '@/components/AuthShell';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 type Mode = 'signin' | 'reset' | 'sent';
 
@@ -25,7 +26,7 @@ function SignIn({
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+  const [errors, setErrors] = useState<{ email?: string; password?: string; general?: string }>({});
   const [loading, setLoading] = useState(false);
   const [resent, setResent] = useState(false);
   const timer = useRef<number | null>(null);
@@ -36,18 +37,58 @@ function SignIn({
     };
   }, []);
 
-  function submitSignIn() {
+  async function submitSignIn() {
     if (loading) return;
-    const next: { email?: string; password?: string } = {};
+    const next: { email?: string; password?: string; general?: string } = {};
     if (!auEmailOk(email)) next.email = a.signIn.errEmail;
     if (password.length === 0) next.password = a.signIn.errPassword;
     setErrors(next);
     if (next.email || next.password) return;
+
     setLoading(true);
-    timer.current = window.setTimeout(() => onSuccess(email.trim().toLowerCase()), 900);
+
+    try {
+      if (!isSupabaseConfigured()) {
+        // Safe development fallback when VITE_SUPABASE_URL is not yet set in environment
+        console.warn('[ClarithmIA Auth]', a.supabaseNotConfigured);
+        setLoading(false);
+        onSuccess(email.trim().toLowerCase());
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+
+      if (error) {
+        let msg = a.authErrorGeneric;
+        const lower = error.message.toLowerCase();
+        if (lower.includes('invalid login credentials') || lower.includes('invalid_credentials')) {
+          msg = a.invalidCredentials;
+        } else if (lower.includes('email not confirmed') || lower.includes('not confirmed')) {
+          msg = a.emailNotConfirmed;
+        } else if (lower.includes('rate limit') || lower.includes('too many requests')) {
+          msg = a.rateLimitExceeded;
+        } else if (error.message) {
+          msg = error.message;
+        }
+        setErrors({ general: msg });
+        setLoading(false);
+        return;
+      }
+
+      if (data?.user) {
+        onSuccess(data.user.email ?? email.trim().toLowerCase());
+      }
+    } catch (err: unknown) {
+      console.error('[ClarithmIA Auth Error]', err);
+      setErrors({ general: a.authErrorGeneric });
+      setLoading(false);
+    }
   }
 
-  function submitReset() {
+  async function submitReset() {
     if (loading) return;
     if (!auEmailOk(email)) {
       setErrors({ email: a.signIn.errEmail });
@@ -55,15 +96,34 @@ function SignIn({
     }
     setErrors({});
     setLoading(true);
-    timer.current = window.setTimeout(() => {
+
+    try {
+      if (isSupabaseConfigured()) {
+        await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+          redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+        });
+      }
+    } catch (err) {
+      console.error('[ClarithmIA Auth Reset Error]', err);
+    } finally {
+      // Per security requirements: always transition to sent view to prevent email enumeration
       setLoading(false);
       setMode('sent');
-    }, 800);
+    }
   }
 
-  function resend() {
+  async function resend() {
     setResent(true);
     if (timer.current) window.clearTimeout(timer.current);
+    try {
+      if (isSupabaseConfigured() && auEmailOk(email)) {
+        await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+          redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+        });
+      }
+    } catch {
+      // Ignored for security (do not disclose account existence)
+    }
     timer.current = window.setTimeout(() => setResent(false), 3000);
   }
 
@@ -84,14 +144,26 @@ function SignIn({
       {mode === 'signin' && (
         <div className="au-view">
           {planNotice && <p className="au-notice">{planNotice}</p>}
+          {!isSupabaseConfigured() && (
+            <p className="text-xs text-amber-400/90 bg-amber-950/40 border border-amber-500/30 rounded px-3 py-2 mb-3">
+              {a.supabaseNotConfigured}
+            </p>
+          )}
           <h1>{a.signIn.title}</h1>
           <p className="au-sub">{a.signIn.subtitle}</p>
+
+          {errors.general && (
+            <div className="text-xs text-rose-300 bg-rose-950/50 border border-rose-500/30 rounded px-3 py-2 mb-4" role="alert">
+              {errors.general}
+            </div>
+          )}
+
           <form
             className="au-form"
             noValidate
             onSubmit={(e) => {
               e.preventDefault();
-              submitSignIn();
+              void submitSignIn();
             }}
           >
             <div className="ws-field">
@@ -109,7 +181,9 @@ function SignIn({
                 aria-invalid={Boolean(errors.email)}
                 onChange={(e) => {
                   setEmail(e.target.value);
-                  if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
+                  if (errors.email || errors.general) {
+                    setErrors((prev) => ({ ...prev, email: undefined, general: undefined }));
+                  }
                 }}
               />
               {errors.email && <small className="ws-error">{errors.email}</small>}
@@ -124,11 +198,15 @@ function SignIn({
               autoComplete="current-password"
               error={errors.password}
               labelAction={
-                <button type="button" className="au-link" onClick={openReset}>{a.signIn.forgot}</button>
+                <button type="button" className="au-link" onClick={openReset}>
+                  {a.signIn.forgot}
+                </button>
               }
               onChange={(value) => {
                 setPassword(value);
-                if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
+                if (errors.password || errors.general) {
+                  setErrors((prev) => ({ ...prev, password: undefined, general: undefined }));
+                }
               }}
             />
 
@@ -139,7 +217,9 @@ function SignIn({
           </form>
           <p className="au-switch">
             {a.signIn.noAccount}{' '}
-            <button type="button" className="au-link strong" onClick={onSwitchToSignUp}>{a.signIn.createAccount}</button>
+            <button type="button" className="au-link strong" onClick={onSwitchToSignUp}>
+              {a.signIn.createAccount}
+            </button>
           </p>
         </div>
       )}
@@ -153,7 +233,7 @@ function SignIn({
             noValidate
             onSubmit={(e) => {
               e.preventDefault();
-              submitReset();
+              void submitReset();
             }}
           >
             <div className="ws-field">
@@ -182,20 +262,28 @@ function SignIn({
             </button>
           </form>
           <p className="au-switch">
-            <button type="button" className="au-link strong" onClick={backToSignIn}>{a.reset.back}</button>
+            <button type="button" className="au-link strong" onClick={backToSignIn}>
+              {a.reset.back}
+            </button>
           </p>
         </div>
       )}
 
       {mode === 'sent' && (
         <div className="au-view au-sent" role="status" aria-live="polite">
-          <span className="au-sent-icon"><AuIcon name="mail" size={26} /></span>
+          <span className="au-sent-icon">
+            <AuIcon name="mail" size={26} />
+          </span>
           <h1>{a.reset.sentTitle}</h1>
           <p className="au-sub">{a.reset.sentText.replace('{email}', email.trim())}</p>
-          <button type="button" className="ws-btn outline au-submit" onClick={resend}>{a.reset.resend}</button>
+          <button type="button" className="ws-btn outline au-submit" onClick={() => void resend()}>
+            {a.reset.resend}
+          </button>
           {resent && <p className="au-note">{a.reset.resent}</p>}
           <p className="au-switch">
-            <button type="button" className="au-link strong" onClick={backToSignIn}>{a.reset.back}</button>
+            <button type="button" className="au-link strong" onClick={backToSignIn}>
+              {a.reset.back}
+            </button>
           </p>
         </div>
       )}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Translation } from '@/i18n';
 import { Icon } from '@/components/icons';
 import { PLATFORM_ICONS, platformDesc, platformLabel, type PlatformId } from '@/components/platforms';
+import { getAuthToken } from '@/lib/supabase';
 
 type FieldId = keyof Translation['integrations']['fields'];
 type FieldKind = 'text' | 'secret' | 'textarea';
@@ -269,11 +270,12 @@ export function ConnectSourceModal({
           const data = await response.json();
           // Persist the verified source to the backend / Supabase
           try {
+            const token = await getAuthToken();
             await fetch('/api/sources', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                authorization: 'Bearer session_default_clarithmia',
+                authorization: `Bearer ${token}`,
               },
               body: JSON.stringify({
                 platform: 'webhook',
@@ -340,11 +342,12 @@ export function ConnectSourceModal({
           const data = await response.json();
           // Persist the verified source to the backend / Supabase
           try {
+            const token = await getAuthToken();
             await fetch('/api/sources', {
               method: 'POST',
               headers: {
                 'content-type': 'application/json',
-                authorization: 'Bearer session_default_clarithmia',
+                authorization: `Bearer ${token}`,
               },
               body: JSON.stringify({
                 platform,
