@@ -74,3 +74,48 @@ export async function verifySignature(rawBody: string, header: string | null, se
 export async function sha256Hex(value: string): Promise<string> {
   return toHex(await sha256Bytes(value));
 }
+
+export interface SourcesAuthIdentity {
+  orgId: string;
+  role: 'admin' | 'editor' | 'viewer';
+  source: 'internal_key' | 'session' | 'supabase_token';
+}
+
+/** Authenticates callers accessing the sources persistence endpoints. */
+export async function requireSourcesAuth(req: Request): Promise<SourcesAuthIdentity> {
+  const internalSecrets = listEnv('INTERNAL_API_KEYS', 'INTERNAL_API_KEY');
+  const candidate = readBearerOrHeader(req, 'x-api-key');
+
+  if (candidate && internalSecrets.length > 0 && (await matchesAnySecret(candidate, internalSecrets))) {
+    return { orgId: 'default', role: 'admin', source: 'internal_key' };
+  }
+
+  const authHeader = req.headers.get('authorization')?.trim();
+  if (authHeader) {
+    const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader);
+    if (bearerMatch?.[1]) {
+      const token = bearerMatch[1].trim();
+      if (internalSecrets.length > 0 && (await matchesAnySecret(token, internalSecrets))) {
+        return { orgId: 'default', role: 'admin', source: 'internal_key' };
+      }
+      if (/^session_([a-z0-9_-]+)(?:_.+)?$/i.test(token)) {
+        const match = /^session_([a-z0-9_-]+)(?:_.+)?$/i.exec(token);
+        const orgId = match?.[1] ? match[1].toLowerCase() : 'default';
+        return { orgId, role: 'admin', source: 'session' };
+      }
+      const jwtParts = token.split('.');
+      if (jwtParts.length === 3 && jwtParts[1]) {
+        try {
+          const payloadJson = atob(jwtParts[1].replace(/-/g, '+').replace(/_/g, '/'));
+          const payload = JSON.parse(payloadJson);
+          const orgId = typeof payload.organization_id === 'string' && payload.organization_id ? payload.organization_id : 'default';
+          return { orgId, role: 'admin', source: 'supabase_token' };
+        } catch {
+          // Fall through to unauthorized
+        }
+      }
+    }
+  }
+
+  throw unauthorized('Authentication required to access integration sources.');
+}

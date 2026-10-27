@@ -13,6 +13,10 @@ function netlifyFunctionsDev(): Plugin {
         let handlerFile: string | null = null;
         if (url.pathname === '/api/webhooks/incoming') {
           handlerFile = '/netlify/functions/webhooks-incoming.ts';
+        } else if (url.pathname === '/api/webhooks/verify') {
+          handlerFile = '/netlify/functions/webhooks-verify.ts';
+        } else if (url.pathname === '/api/sources') {
+          handlerFile = '/netlify/functions/sources.ts';
         } else if (url.pathname === '/api/connectors/twitter') {
           handlerFile = '/netlify/functions/connectors-twitter.ts';
         } else if (url.pathname === '/api/connectors/zendesk') {

@@ -1,4 +1,4 @@
-import { requireInternalAuth, requireWebhookToken } from './auth.ts';
+import { requireInternalAuth, requireSourcesAuth, requireWebhookToken } from './auth.ts';
 import { intEnv, listEnv } from './env.ts';
 import { methodNotAllowed, toAppError } from './errors.ts';
 import { createLogger, serializeError, type Logger } from './logger.ts';
@@ -27,7 +27,7 @@ function corsHeaders(req: Request): Record<string, string> {
   if (!allowed.includes('*') && !allowed.includes(origin)) return {};
   return {
     'access-control-allow-origin': allowed.includes('*') ? '*' : origin,
-    'access-control-allow-methods': 'GET, POST, OPTIONS',
+    'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
     'access-control-allow-headers': 'authorization, content-type, x-api-key, x-request-id, x-webhook-token, x-signature',
     'access-control-max-age': '600',
     vary: 'origin',
@@ -50,7 +50,7 @@ export interface HandlerOptions {
   /** Used in logs, e.g. `connector.zendesk`. */
   name: string;
   methods: readonly string[];
-  auth: 'internal' | 'webhook';
+  auth: 'internal' | 'webhook' | 'sources';
   /** Enables CORS headers for browser callers (connector endpoints only). */
   cors?: boolean;
   handle: (ctx: HandlerContext) => Promise<HandlerResult>;
@@ -75,7 +75,8 @@ export function createHandler(options: HandlerOptions): (req: Request) => Promis
       } else {
         if (!options.methods.includes(req.method)) throw methodNotAllowed(options.methods);
         if (options.auth === 'internal') await requireInternalAuth(req);
-        else await requireWebhookToken(req);
+        else if (options.auth === 'webhook') await requireWebhookToken(req);
+        else if (options.auth === 'sources') await requireSourcesAuth(req);
 
         const deadlineAt = startedAt + intEnv('REQUEST_DEADLINE_MS', 8000, 1000, 25000);
         const result = await options.handle({ req, url, requestId, log, startedAt, deadlineAt });

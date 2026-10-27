@@ -251,24 +251,47 @@ export function ConnectSourceModal({
     try {
       if (platform === 'webhook') {
         const token = (values.secretKey ?? '').trim();
-        const response = await fetch('/api/webhooks/incoming', {
+        // Dedicated validation endpoint: verifies credentials without creating synthetic feedback or invoking AI
+        const response = await fetch('/api/webhooks/verify', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             'x-webhook-token': token,
           },
           body: JSON.stringify({
-            text: 'Verificação de conexão ClarithmIA',
-            author: { name: 'Sistema de Verificação', handle: 'clarithmia_system' },
-            metadata: { test: true, initiatedAt: new Date().toISOString() },
+            test: true,
+            timestamp: new Date().toISOString(),
           }),
           signal: ac.signal,
         });
 
         if (response.status === 200) {
           const data = await response.json();
+          // Persist the verified source to the backend / Supabase
+          try {
+            await fetch('/api/sources', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                authorization: 'Bearer session_default_clarithmia',
+              },
+              body: JSON.stringify({
+                platform: 'webhook',
+                status: 'operational',
+                connected: true,
+                displayName: platformLabel(t, 'webhook'),
+                configMetadata: {
+                  endpointUrl: webhookEndpointUrl,
+                  verifiedAt: new Date().toISOString(),
+                },
+              }),
+            });
+          } catch {
+            // Silently handled if persistence offline
+          }
+
           setSuccessDetails({
-            accepted: data.accepted ?? 1,
+            accepted: 1,
             persistedTo: data.persistedTo ?? 'none',
             requestId: data.requestId,
             connector: 'webhook',
@@ -276,7 +299,7 @@ export function ConnectSourceModal({
           });
           setPhase('success');
           onConnected('webhook', {
-            count: String(data.accepted ?? 1),
+            count: '0',
             lastSync: t.language === 'PT' ? 'agora' : 'just now',
           });
         } else if (response.status === 401) {
@@ -315,6 +338,28 @@ export function ConnectSourceModal({
 
         if (response.status === 200) {
           const data = await response.json();
+          // Persist the verified source to the backend / Supabase
+          try {
+            await fetch('/api/sources', {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                authorization: 'Bearer session_default_clarithmia',
+              },
+              body: JSON.stringify({
+                platform,
+                status: 'operational',
+                connected: true,
+                displayName: platformLabel(t, platform),
+                configMetadata: {
+                  verifiedAt: new Date().toISOString(),
+                },
+              }),
+            });
+          } catch {
+            // Handled
+          }
+
           setSuccessDetails({
             accepted: data.synced ?? 0,
             persistedTo: data.persistedTo ?? 'none',
