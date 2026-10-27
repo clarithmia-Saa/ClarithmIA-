@@ -43,13 +43,19 @@ function SourcesView({ t }: { t: Translation }) {
     );
   }
 
-  function markConnected(platform: PlatformId, index: number | null) {
+  function markConnected(platform: PlatformId, index: number | null, meta?: { count?: string; lastSync?: string }) {
     setSources((prev) => {
       const existing = index !== null ? index : prev.findIndex((s) => s.platform === platform && !s.connected);
+      const nextSync = meta?.lastSync ?? (t.language === 'PT' ? 'agora' : 'just now');
+      const nextCount = meta?.count ?? '1';
       if (existing >= 0 && prev[existing]) {
-        return prev.map((s, i) => (i === existing ? { ...s, connected: true, status: 'syncing', lastSync: 'now' } : s));
+        return prev.map((s, i) =>
+          i === existing
+            ? { ...s, connected: true, status: 'operational', lastSync: nextSync, count: s.count === '0' ? nextCount : s.count }
+            : s,
+        );
       }
-      return [...prev, { platform, status: 'syncing', count: '0', lastSync: 'now', connected: true }];
+      return [...prev, { platform, status: 'operational', count: nextCount, lastSync: nextSync, connected: true }];
     });
   }
 
@@ -142,7 +148,7 @@ function SourcesView({ t }: { t: Translation }) {
           platform={target.platform}
           mode={target.mode}
           onClose={() => setTarget(null)}
-          onConnected={(platform) => markConnected(platform, target.index)}
+          onConnected={(platform, meta) => markConnected(platform, target.index, meta)}
         />
       )}
     </div>

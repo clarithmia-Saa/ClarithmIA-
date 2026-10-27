@@ -164,6 +164,35 @@ describe('POST /api/webhooks/incoming', () => {
     assert.ok(!joined.includes(WEBHOOK_SECRET));
     assert.ok(!joined.includes('private complaint'));
   });
+
+  it('handles CORS preflight OPTIONS requests for browser integration modals', async () => {
+    const restore = setEnv({ CORS_ALLOWED_ORIGINS: '*' });
+    try {
+      const res = await webhook(new Request('https://x.test/api/webhooks/incoming', {
+        method: 'OPTIONS',
+        headers: { origin: 'http://localhost:3000' },
+      }));
+      assert.equal(res.status, 204);
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      assert.ok(res.headers.get('access-control-allow-headers')?.includes('x-webhook-token'));
+    } finally {
+      restore();
+    }
+  });
+
+  it('accepts real verification ping payload sent by ConnectSourceModal', async () => {
+    const res = await webhook(hook({
+      text: 'Verificação de conexão ClarithmIA',
+      author: { name: 'Sistema de Verificação', handle: 'clarithmia_system' },
+      metadata: { test: true, initiatedAt: '2026-10-26T12:00:00Z' },
+    }));
+    assert.equal(res.status, 200);
+    const json = await body(res);
+    assert.equal(json.ok, true);
+    assert.equal(json.accepted, 1);
+    assert.equal(json.connector, 'webhook');
+    assert.ok(json.requestId);
+  });
 });
 
 const zdTicket = (id: number, extra: Record<string, unknown> = {}) => ({

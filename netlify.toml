@@ -1,13 +1,13 @@
-# The app lives in a subdirectory; build from there.
-# `publish` and `functions` paths are relative to `base`.
 [build]
-  base = "clarithmia-atualizado"
   command = "npm ci && npm run build"
   publish = "dist"
 
 [build.environment]
   NODE_VERSION = "20"
 
+# Serverless functions (Phase 6 connectors). Routes are declared inside each
+# function through `export const config = { path: ... }`:
+#   /api/connectors/zendesk   /api/connectors/twitter   /api/webhooks/incoming
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"

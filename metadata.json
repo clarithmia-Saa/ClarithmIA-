@@ -1,0 +1,7 @@
+{
+  "name": "ClarithmIA B2B SaaS Platform",
+  "description": "AI customer feedback intelligence and analytics platform",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

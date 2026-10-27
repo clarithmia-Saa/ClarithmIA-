@@ -34,6 +34,7 @@ export default createHandler({
   name: 'webhook.incoming',
   methods: ['POST'],
   auth: 'webhook',
+  cors: true,
   async handle({ req, log, deadlineAt }) {
     const contentType = req.headers.get('content-type') ?? '';
     if (!/^application\/(.+\+)?json\b/i.test(contentType)) throw unsupportedMediaType('application/json');
