@@ -28,7 +28,7 @@ function corsHeaders(req: Request): Record<string, string> {
   return {
     'access-control-allow-origin': allowed.includes('*') ? '*' : origin,
     'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
-    'access-control-allow-headers': 'authorization, content-type, x-api-key, x-request-id, x-webhook-token, x-signature',
+    'access-control-allow-headers': 'authorization, content-type, x-api-key, x-organization-id, x-request-id, x-webhook-token, x-signature',
     'access-control-max-age': '600',
     vary: 'origin',
   };

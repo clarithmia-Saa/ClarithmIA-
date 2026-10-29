@@ -25,7 +25,9 @@ há redirects no `netlify.toml`.
   compatível com o filtro da Inbox, e os motivos) e `confidence`. É determinístico, então
   dá para trocar `analyze()` por uma chamada de LLM sem mudar o contrato.
 * **Persistência** (`lib/sink.ts`): se `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` existirem,
-  faz *upsert* idempotente por `dedupe_key` (schema em `supabase/migrations`). Se a gravação
+  faz *upsert* idempotente por `organization_id + dedupe_key` (schema em `supabase/migrations`).
+  A persistência exige um `DEFAULT_ORGANIZATION_ID` real para conectores internos; o webhook usa
+  `WEBHOOK_ORGANIZATION_ID`. Não é permitido gravar implicitamente no tenant `default`. Se a gravação
   falhar, a resposta é **502 `PERSISTENCE_FAILED` (retryable)** e o cursor **não avança**,
   então nada se perde. Sem Supabase, só devolve os itens.
 
@@ -77,6 +79,7 @@ Observação: a leitura de menções depende do **plano da X API**; planos sem a
 1. Valida o token do header (comparação em tempo constante, aceita rotação via `WEBHOOK_SECRETS=a,b`).
 2. Exige `Content-Type: application/json`, corpo ≤ `WEBHOOK_MAX_BODY_BYTES` (256 KB) e ≤ `WEBHOOK_MAX_ITEMS` itens (100).
 3. Se `WEBHOOK_SIGNING_SECRET` existir, também exige `x-signature: sha256=<hmac hex do corpo bruto>`.
+4. Com persistência habilitada, `WEBHOOK_ORGANIZATION_ID` é obrigatório para associar os dados ao tenant correto.
 4. Aceita um objeto, um array, ou `{ items | data | feedback | events | records: [...] }`.
 5. Mapeia campos livres: texto (`text|message|body|content|comment|review|feedback|description`),
    id (`id|external_id|ticket_id|review_id|uuid`; se faltar, gera um hash estável), data, autor
@@ -156,3 +159,20 @@ Aplique `supabase/migrations/20261025000000_feedback.sql` se for persistir.
 * O cache `username → id` da X vive na instância da function (some em *cold start*).
 * A gravação no Supabase usa a API REST (PostgREST) e **não foi testada contra um banco real**;
   os testes a cobrem com `fetch` simulado.
+
+
+## Segurança de autenticação e multi-tenancy
+
+- `/api/sources` não aceita mais tokens `session_*` nem decodifica JWTs por conta própria.
+  O token Bearer é validado pelo endpoint `/auth/v1/user` do Supabase; a organização e o papel
+  são carregados de `public.organization_members`, nunca de claims enviados pelo navegador.
+- Configure no ambiente do servidor `SUPABASE_URL`, `SUPABASE_ANON_KEY` e
+  `SUPABASE_SERVICE_ROLE_KEY`. A chave `service_role` deve existir somente no backend.
+- Para rotas internas que persistem feedback, configure `DEFAULT_ORGANIZATION_ID` com um ID
+  existente em `public.organizations`. Configure `WEBHOOK_ORGANIZATION_ID` para o tenant que
+  possui o endpoint de webhook. Não use `default`.
+- Usuários que pertencem a várias organizações devem enviar `x-organization-id`; o backend
+  confirma a associação antes de permitir o acesso. A role `viewer` não pode modificar fontes.
+- A migração `20261029000000_security_tenancy_hardening.sql` reforça RLS e escopo da deduplicação.
+  Linhas antigas marcadas como `default` não são atribuídas automaticamente a uma empresa:
+  revise-as e associe-as manualmente a uma organização verificada antes de disponibilizá-las.

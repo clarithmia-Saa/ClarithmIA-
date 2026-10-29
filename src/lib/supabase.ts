@@ -31,21 +31,22 @@ export const supabase: SupabaseClient = createClient(
 );
 
 /**
- * Returns the current authenticated access_token from the Supabase session,
- * or a safe default bearer session token when unconfigured or in local demo mode.
+ * Returns only a real Supabase access token. Demo/fallback credentials are
+ * deliberately not generated: the backend must reject unauthenticated calls.
  */
 export async function getAuthToken(): Promise<string> {
-  if (isSupabaseConfigured()) {
-    try {
-      const { data } = await supabase.auth.getSession();
-      if (data?.session?.access_token) {
-        return data.session.access_token;
-      }
-    } catch (err) {
-      console.warn('[ClarithmIA Auth] Error obtaining session token:', err);
+  if (!isSupabaseConfigured()) return '';
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      console.warn('[ClarithmIA Auth] Error obtaining session token:', error.message);
+      return '';
     }
+    return data?.session?.access_token ?? '';
+  } catch (err) {
+    console.warn('[ClarithmIA Auth] Error obtaining session token:', err);
+    return '';
   }
-  return 'session_default_clarithmia';
 }
 
 export type { Session };

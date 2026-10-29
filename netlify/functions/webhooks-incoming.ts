@@ -1,10 +1,10 @@
 import { verifySignature } from '../lib/auth.ts';
 import { intEnv, optionalEnv } from '../lib/env.ts';
-import { AppError, badRequest, payloadTooLarge, toAppError, unprocessable, unsupportedMediaType } from '../lib/errors.ts';
+import { AppError, badRequest, configError, payloadTooLarge, toAppError, unprocessable, unsupportedMediaType } from '../lib/errors.ts';
 import { createHandler } from '../lib/http.ts';
 import { analyzeBatch } from '../lib/ai.ts';
 import { normalizeWebhookItem } from '../lib/normalize.ts';
-import { persistFeedback } from '../lib/sink.ts';
+import { isPersistenceConfigured, persistFeedback } from '../lib/sink.ts';
 import { startSync } from '../lib/sync.ts';
 import type { NormalizedFeedback } from '../lib/types.ts';
 
@@ -93,7 +93,15 @@ export default createHandler({
 
       let persistTarget: 'supabase' | 'none' = 'none';
       try {
-        const persisted = await persistFeedback(processed, { log, deadlineAt });
+        const webhookOrganizationId = optionalEnv('WEBHOOK_ORGANIZATION_ID');
+        if (isPersistenceConfigured() && !webhookOrganizationId) {
+          throw configError('WEBHOOK_ORGANIZATION_ID');
+        }
+        const persisted = await persistFeedback(processed, {
+          log,
+          deadlineAt,
+          ...(webhookOrganizationId ? { organizationId: webhookOrganizationId } : {}),
+        });
         tracker.counts.persisted = persisted.persisted;
         persistTarget = persisted.target;
       } catch (err) {

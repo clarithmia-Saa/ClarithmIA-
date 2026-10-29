@@ -134,9 +134,11 @@ describe('POST /api/webhooks/incoming', () => {
       const json = await body(res);
       assert.equal(json.persistedTo, 'supabase');
       assert.equal(ok.calls.length, 1);
-      assert.ok(ok.calls[0]!.url.includes('/rest/v1/feedback?on_conflict=dedupe_key'));
+      assert.ok(ok.calls[0]!.url.includes('/rest/v1/feedback?on_conflict=organization_id,dedupe_key'));
       assert.equal(ok.calls[0]!.headers.prefer, 'resolution=merge-duplicates,return=minimal');
-      assert.equal(JSON.parse(ok.calls[0]!.body ?? '[]')[0].sentiment_label, 'positive');
+      const persistedRow = JSON.parse(ok.calls[0]!.body ?? '[]')[0];
+      assert.equal(persistedRow.sentiment_label, 'positive');
+      assert.equal(persistedRow.organization_id, 'org_test_default');
       ok.restore();
 
       const failing = mockFetch(() => jsonResponse({ message: 'down' }, 400));

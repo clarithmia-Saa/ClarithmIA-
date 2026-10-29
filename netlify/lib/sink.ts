@@ -1,4 +1,5 @@
 import { fetchJson } from './http-client.ts';
+import { configError } from './errors.ts';
 import { optionalEnv } from './env.ts';
 import type { Logger } from './logger.ts';
 import type { ProcessedFeedback } from './types.ts';
@@ -12,8 +13,9 @@ export function isPersistenceConfigured(): boolean {
   return Boolean(optionalEnv('SUPABASE_URL') && optionalEnv('SUPABASE_SERVICE_ROLE_KEY'));
 }
 
-function toRow(item: ProcessedFeedback): Record<string, unknown> {
+function toRow(item: ProcessedFeedback, organizationId: string): Record<string, unknown> {
   return {
+    organization_id: organizationId,
     dedupe_key: item.dedupeKey,
     source: item.source,
     channel: item.channel,
@@ -43,19 +45,26 @@ function toRow(item: ProcessedFeedback): Record<string, unknown> {
 }
 
 /**
- * Idempotent upsert into Supabase (PostgREST) keyed by `dedupe_key`.
- * When Supabase is not configured the items are simply returned to the caller.
+ * Idempotent tenant-scoped upsert into Supabase. A configured organization is
+ * mandatory whenever persistence is enabled; records never silently fall into
+ * a shared "default" tenant.
  */
 export async function persistFeedback(
   items: readonly ProcessedFeedback[],
-  ctx: { log: Logger; deadlineAt: number; fetchImpl?: typeof fetch },
+  ctx: { log: Logger; deadlineAt: number; organizationId?: string; fetchImpl?: typeof fetch },
 ): Promise<PersistResult> {
   const url = optionalEnv('SUPABASE_URL');
   const key = optionalEnv('SUPABASE_SERVICE_ROLE_KEY');
   if (!url || !key || items.length === 0) return { target: 'none', persisted: 0 };
 
+  const organizationId = ctx.organizationId?.trim() || optionalEnv('DEFAULT_ORGANIZATION_ID');
+  if (!organizationId) throw configError('DEFAULT_ORGANIZATION_ID');
+  if (organizationId === 'default') {
+    throw configError('DEFAULT_ORGANIZATION_ID (must be a real organization ID)');
+  }
+
   const table = optionalEnv('SUPABASE_FEEDBACK_TABLE') ?? 'feedback';
-  const endpoint = `${url.replace(/\/+$/, '')}/rest/v1/${encodeURIComponent(table)}?on_conflict=dedupe_key`;
+  const endpoint = `${url.replace(/\/+$/, '')}/rest/v1/${encodeURIComponent(table)}?on_conflict=organization_id,dedupe_key`;
   let persisted = 0;
 
   for (let i = 0; i < items.length; i += 100) {
@@ -69,13 +78,13 @@ export async function persistFeedback(
         authorization: `Bearer ${key}`,
         prefer: 'resolution=merge-duplicates,return=minimal',
       },
-      body: chunk.map(toRow),
+      body: chunk.map((item) => toRow(item, organizationId)),
       deadlineAt: ctx.deadlineAt,
       log: ctx.log,
       ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
     });
     persisted += chunk.length;
   }
-  ctx.log.info('persist.completed', { target: 'supabase', table, persisted });
+  ctx.log.info('persist.completed', { target: 'supabase', table, organizationId, persisted });
   return { target: 'supabase', persisted };
 }

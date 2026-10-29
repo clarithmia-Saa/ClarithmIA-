@@ -146,7 +146,7 @@ export default createHandler({
       let persistTarget: 'supabase' | 'none' = 'none';
       if (!dryRun) {
         try {
-          const persisted = await persistFeedback(processed, { log, deadlineAt });
+          const persisted = await persistFeedback(processed, { log, deadlineAt, organizationId: optionalEnv('DEFAULT_ORGANIZATION_ID') });
           tracker.counts.persisted = persisted.persisted;
           persistTarget = persisted.target;
         } catch (err) {

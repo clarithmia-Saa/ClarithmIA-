@@ -18,6 +18,9 @@ export function setEnv(values: Record<string, string | undefined>): () => void {
 
 export const BASE_ENV: Record<string, string | undefined> = {
   INTERNAL_API_KEY: INTERNAL_KEY,
+  DEFAULT_ORGANIZATION_ID: 'org_test_default',
+  WEBHOOK_ORGANIZATION_ID: 'org_test_default',
+  SUPABASE_ANON_KEY: 'mock-anon-key',
   WEBHOOK_SECRET: WEBHOOK_SECRET,
   WEBHOOK_SIGNING_SECRET: undefined,
   ZENDESK_SUBDOMAIN: 'acme',

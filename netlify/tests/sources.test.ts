@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 const internalAuth = { 'x-api-key': INTERNAL_KEY };
-const sessionAuth = { authorization: 'Bearer session_default_test' };
+const sessionAuth = internalAuth;
 
 async function parseBody(res: Response): Promise<any> {
   return res.json();
@@ -63,7 +63,7 @@ describe('Sources API (/api/sources)', () => {
               feedbacks_count: 42,
               last_sync_at: '2026-10-27T10:00:00Z',
               config_metadata: { endpointUrl: '/api/webhooks/incoming' },
-              organization_id: 'default',
+              organization_id: 'org_test_default',
             },
           ]);
         }
