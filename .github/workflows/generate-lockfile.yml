@@ -1,7 +1,9 @@
 name: Generate ClarithmIA package lock
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - fix/security-multitenancy
 
 permissions:
   contents: read
@@ -16,10 +18,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Generate package lock
         run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
