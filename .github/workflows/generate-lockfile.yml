@@ -1,0 +1,38 @@
+name: Generate ClarithmIA package lock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate and validate package-lock.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate package lock
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Validate generated lockfile
+        run: |
+          test -s package-lock.json
+          npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Upload generated lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: clarithmia-package-lock
+          path: package-lock.json
+          if-no-files-found: error
+          retention-days: 3
