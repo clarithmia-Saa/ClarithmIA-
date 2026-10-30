@@ -6,7 +6,7 @@ on:
       - fix/security-multitenancy
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   generate:
@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: fix/security-multitenancy
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
@@ -30,6 +33,18 @@ jobs:
         run: |
           test -s package-lock.json
           npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Commit lockfile to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "package-lock.json is already up to date."
+          else
+            git commit -m "Add generated package lock"
+            git push origin HEAD:fix/security-multitenancy
+          fi
 
       - name: Upload generated lockfile
         uses: actions/upload-artifact@v4
